@@ -32,7 +32,14 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
-from funcnodes_core.io import InputMeta, OutputMeta
+from funcnodes_core.io import InputMeta, OutputMeta,NoValue
+
+# Import Union flattening utilities
+from .union_flattener import (
+    resolve_union_models,
+    collect_union_fields,
+)
+
 
 
 _SENTINEL = object()
@@ -194,34 +201,118 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
         output_processor: Callable[[Any], Any] | None = None
         output_annotation = type_hints.get("return", signature.return_annotation)
         processed_return_annotation = output_annotation
-        output_model_cls = _resolve_model_cls(output_annotation)
-
-        if output_model_cls is not None and output_levels != 0:
-            traversal_levels = (
-                None if output_levels == -1 else max(1, output_levels)
+        
+        # First check for Union types
+        union_models = None
+        if resolve_union_models is not None:
+            union_models = resolve_union_models(output_annotation)
+            
+        if union_models is not None and output_levels != 0:
+            # Handle Union[BaseModel, ...] flattening
+            all_union_fields = collect_union_fields(union_models)
+            output_specs = []
+            
+            # Create specs for all possible fields across all union members
+            for field_name, (field_type, field_info) in all_union_fields.items():
+                meta: OutputMeta = OutputMeta(
+                    name=field_name,
+                    description=field_info.description or "",
+                )
+                value_options = _derive_value_options(field_info, field_type)
+                if value_options:
+                    meta["value_options"] = value_options
+                output_specs.append(
+                    _OutputFieldSpec(path=(field_name,), meta=meta)
+                )
+            
+            # Add a special field for the actual type name
+            output_specs.append(
+                _OutputFieldSpec(
+                    path=("__typename__",),
+                    meta=OutputMeta(
+                        name="__typename__",
+                        description="Actual type name of the returned union member",
+                    ),
+                )
             )
-            output_specs = _build_output_specs(output_model_cls, traversal_levels)
+            
             if output_specs:
                 output_annotations = []
-
                 for spec in output_specs:
-                    field_annotation = _annotation_for_output(
-                        output_model_cls, spec.path
-                    )
+                    if spec.path[0] == "__typename__":
+                        field_annotation = str
+                    else:
+                        field_name = spec.path[0]
+                        field_annotation = all_union_fields[field_name][0]
                     output_annotations.append(Annotated[field_annotation, spec.meta])
-
+                
                 processed_return_annotation = tuple[tuple(output_annotations)]  # type: ignore[assignment]
-
-                def _process_output(value: Any) -> tuple[Any, ...]:
+                
+                def _process_union_output(value: Any) -> tuple[Any, ...]:
                     if value is None:
-                        raise ValueError("Expected BaseModel return value, got None")
-                    if not isinstance(value, output_model_cls):
-                        value = output_model_cls.model_validate(value)
-                    return tuple(
-                        _extract_value(value, spec.path) for spec in output_specs
-                    )
+                        raise ValueError("Expected Union[BaseModel] return value, got None")
+                    
+                    # Validate that it's one of the expected types
+                    if not isinstance(value, BaseModel):
+                        # Try to construct from one of the union members
+                        for model_cls in union_models:
+                            try:
+                                value = model_cls.model_validate(value)
+                                break
+                            except:
+                                continue
+                        else:
+                            raise ValueError(
+                                f"Could not validate value as any of the union members: {union_models}"
+                            )
+                    
+                    # Get the actual model's fields
+                    value_dict = value.model_dump()
+                    result = []
+                    
+                    for spec in output_specs:
+                        field_name = spec.path[0]
+                        if field_name == "__typename__":
+                            result.append(value.__class__.__name__)
+                        elif field_name in value_dict:
+                            result.append(value_dict[field_name])
+                        else:
+                            # Use sentinel for fields not in this model
+                            result.append(NoValue)
+                    
+                    return tuple(result)
+                
+                output_processor = _process_union_output
+        
+        # Fallback to single model handling
+        else:
+            output_model_cls = _resolve_model_cls(output_annotation)
+            if output_model_cls is not None and output_levels != 0:
+                traversal_levels = (
+                    None if output_levels == -1 else max(1, output_levels)
+                )
+                output_specs = _build_output_specs(output_model_cls, traversal_levels)
+                if output_specs:
+                    output_annotations = []
 
-                output_processor = _process_output
+                    for spec in output_specs:
+                        field_annotation = _annotation_for_output(
+                            output_model_cls, spec.path
+                        )
+                        output_annotations.append(Annotated[field_annotation, spec.meta])
+
+                    processed_return_annotation = tuple[tuple(output_annotations)]  # type: ignore[assignment]
+
+                    def _process_output(value: Any) -> tuple[Any, ...]:
+                        if value is None:
+                            raise ValueError("Expected BaseModel return value, got None")
+                        if not isinstance(value, output_model_cls):
+                            value = output_model_cls.model_validate(value)
+                        return tuple(
+                            _extract_value(value, spec.path) for spec in output_specs
+                        )
+
+                    output_processor = _process_output
 
         if processed_return_annotation is not inspect._empty:
             new_annotations["return"] = processed_return_annotation

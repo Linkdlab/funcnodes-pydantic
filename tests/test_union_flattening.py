@@ -7,9 +7,9 @@ from typing import Union
 
 import pytest
 from pydantic import BaseModel, Field
+import funcnodes as fn
 
 from funcnodes_pydantic.union_flattener import (
-    NOT_PRESENT,
     collect_union_fields,
     flatten_union_output,
     resolve_union_models,
@@ -80,10 +80,10 @@ def test_flatten_union_output_success():
     assert flattened["__typename__"] == "SuccessResponse"
     
     # Check sentinel values for fields from other models
-    assert flattened["error_code"] is NOT_PRESENT
-    assert flattened["message"] is NOT_PRESENT
-    assert flattened["warning_level"] is NOT_PRESENT
-    assert flattened["details"] is NOT_PRESENT
+    assert flattened["error_code"] is fn.NoValue
+    assert flattened["message"] is fn.NoValue
+    assert flattened["warning_level"] is fn.NoValue
+    assert flattened["details"] is fn.NoValue
 
 
 def test_flatten_union_output_error():
@@ -101,10 +101,10 @@ def test_flatten_union_output_error():
     assert flattened["__typename__"] == "ErrorResponse"
     
     # Check sentinel values
-    assert flattened["data"] is NOT_PRESENT
-    assert flattened["timestamp"] is NOT_PRESENT
-    assert flattened["warning_level"] is NOT_PRESENT
-    assert flattened["details"] is NOT_PRESENT
+    assert flattened["data"] is fn.NoValue
+    assert flattened["timestamp"] is fn.NoValue
+    assert flattened["warning_level"] is fn.NoValue
+    assert flattened["details"] is fn.NoValue
 
 
 def test_optional_union():

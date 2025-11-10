@@ -19,6 +19,7 @@ from .models import (
 from .unpackers import PydanticUnpacker
 
 
+
 def _encode_base_model(value: Any, preview: bool = False):
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json" if preview else "python"), True
