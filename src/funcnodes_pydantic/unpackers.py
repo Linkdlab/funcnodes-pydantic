@@ -91,22 +91,23 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
         input_levels: Maximum recursion depth when expanding input models.
             ``1`` flattens only the top-level fields; higher numbers continue
             into nested ``BaseModel`` attributes. ``0`` disables input
-            flattening entirely.
+            flattening entirely, while ``-1`` traverses without a depth limit.
         output_levels: Same as ``input_levels`` but applied to the return
-            annotation. ``0`` keeps the original return type untouched.
+            annotation. ``0`` keeps the original return type untouched and
+            ``-1`` traverses without a depth limit.
 
     Returns:
         Callable[..., Any]: Decorator that rewrites the target function’s
         signature and return type but preserves its runtime behavior.
 
     Raises:
-        ValueError: If the provided levels are negative.
+        ValueError: If the provided levels are less than ``-1``.
     """
 
-    if input_levels < 0:
-        raise ValueError("input_levels must be >= 0")
-    if output_levels < 0:
-        raise ValueError("output_levels must be >= 0")
+    if input_levels < -1:
+        raise ValueError("input_levels must be >= -1")
+    if output_levels < -1:
+        raise ValueError("output_levels must be >= -1")
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         signature = inspect.signature(func)
@@ -139,7 +140,10 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                     f"Cannot unpack BaseModel parameter '{parameter.name}' defined as variadic"
                 )
 
-            summaries = _collect_field_summaries(model_cls, max(1, input_levels))
+            traversal_levels = (
+                None if input_levels == -1 else max(1, input_levels)
+            )
+            summaries = _collect_field_summaries(model_cls, traversal_levels)
             field_specs: list[_InputFieldSpec] = []
             for summary in summaries:
                 generated = _build_parameter_name(
@@ -192,8 +196,11 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
         processed_return_annotation = output_annotation
         output_model_cls = _resolve_model_cls(output_annotation)
 
-        if output_model_cls is not None and output_levels > 0:
-            output_specs = _build_output_specs(output_model_cls, output_levels)
+        if output_model_cls is not None and output_levels != 0:
+            traversal_levels = (
+                None if output_levels == -1 else max(1, output_levels)
+            )
+            output_specs = _build_output_specs(output_model_cls, traversal_levels)
             if output_specs:
                 output_annotations = []
 
@@ -388,38 +395,51 @@ def _enum_options(annotation: Any) -> list[Any] | None:
 
 @lru_cache(maxsize=256)
 def _collect_field_summaries(
-    model_cls: type[BaseModel], levels: int
+    model_cls: type[BaseModel], levels: int | None
 ) -> tuple[_FieldSummary, ...]:
-    """Walk ``model_cls`` and collect all fields up to ``levels`` deep."""
+    """Walk ``model_cls`` and collect all fields up to ``levels`` deep.
 
-    summaries: list[_FieldSummary] = []
-    for name, field in model_cls.model_fields.items():
-        alias = field.alias or name
-        annotation = field.annotation
-        field_type = _base_annotation(annotation)
-        is_model = isinstance(field_type, type) and issubclass(field_type, BaseModel)
-        if levels > 1 and is_model:
-            for nested in _collect_field_summaries(field_type, levels - 1):
-                summaries.append(
-                    _FieldSummary(
+    When ``levels`` is ``None`` the traversal continues until it reaches
+    non-``BaseModel`` leaves, with cycle detection to avoid infinite recursion.
+    """
+
+    def _walk(
+        current_cls: type[BaseModel],
+        remaining: int | None,
+        ancestors: tuple[type[BaseModel], ...],
+    ) -> typing.Iterator[_FieldSummary]:
+        for name, field in current_cls.model_fields.items():
+            alias = field.alias or name
+            annotation = field.annotation
+            field_type = _base_annotation(annotation)
+            is_model = isinstance(field_type, type) and issubclass(field_type, BaseModel)
+
+            should_descend = (
+                is_model
+                and (remaining is None or remaining > 1)
+                and field_type not in ancestors
+            )
+            if should_descend:
+                next_levels = None if remaining is None else remaining - 1
+                next_ancestors = ancestors + (field_type,)
+                for nested in _walk(field_type, next_levels, next_ancestors):
+                    yield _FieldSummary(
                         path=(name, *nested.path),
                         alias_path=(alias, *nested.alias_path),
                         annotation=nested.annotation,
                         field_info=nested.field_info,
                         is_model=nested.is_model,
                     )
-                )
-        else:
-            summaries.append(
-                _FieldSummary(
+            else:
+                yield _FieldSummary(
                     path=(name,),
                     alias_path=(alias,),
                     annotation=annotation,
                     field_info=field,
                     is_model=is_model,
                 )
-            )
-    return tuple(summaries)
+
+    return tuple(_walk(model_cls, levels, (model_cls,)))
 
 
 def _base_annotation(annotation: Any) -> Any:
@@ -456,9 +476,13 @@ def _assign_path(container: dict[str, Any], path: Sequence[str], value: Any) -> 
 
 
 def _build_output_specs(
-    model_cls: type[BaseModel], levels: int
+    model_cls: type[BaseModel], levels: int | None
 ) -> tuple[_OutputFieldSpec, ...]:
-    """Reuse `_collect_field_summaries` to prepare return-value metadata."""
+    """Reuse `_collect_field_summaries` to prepare return-value metadata.
+
+    ``levels`` accepts ``None`` for unbounded traversal, mirroring the input
+    handling logic.
+    """
 
     summaries = _collect_field_summaries(model_cls, levels)
     specs: list[_OutputFieldSpec] = []

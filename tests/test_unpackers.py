@@ -24,6 +24,24 @@ class ResponseModel(BaseModel):
     value: str = Field(..., description="Payload value")
 
 
+class GrandChildModel(BaseModel):
+    token: str = Field(..., description="Grandchild token")
+
+
+class DeepChildModel(BaseModel):
+    grandchild: GrandChildModel
+
+
+class DeepParentModel(BaseModel):
+    child: DeepChildModel
+    title: str = Field(..., description="Title field")
+
+
+class DeepResponseModel(BaseModel):
+    nested: DeepChildModel
+    status: str = Field(..., description="Mirror status")
+
+
 def _extract_meta(annotation):
     origin = typing.get_origin(annotation)
     assert origin is typing.Annotated
@@ -87,6 +105,35 @@ def test_rehydration_and_output_flatten():
     assert result == ("done", "321")
 
 
+def test_unlimited_input_and_output_levels_traverse_full_tree():
+    captured: list[DeepParentModel] = []
+
+    @PydanticUnpacker(input_levels=-1, output_levels=-1)
+    def run(payload: DeepParentModel) -> DeepResponseModel:
+        captured.append(payload)
+        return DeepResponseModel(nested=payload.child, status=payload.title)
+
+    sig = inspect.signature(run)
+    params = tuple(sig.parameters)
+    assert "payload_child_grandchild_token" in params
+    assert "payload_child" not in params
+
+    hints = typing.get_type_hints(run, include_extras=True)
+    token_ann = hints["payload_child_grandchild_token"]
+    base, meta = _extract_meta(token_ann)
+    assert base is str
+    assert meta["name"] == "payload.child.grandchild.token"
+
+    result = run(
+        payload_child_grandchild_token="nested",
+        payload_title="ready",
+    )
+    assert result == ("nested", "ready")
+    assert captured and isinstance(captured[0], DeepParentModel)
+    assert captured[0].child.grandchild.token == "nested"
+    assert captured[0].title == "ready"
+
+
 def test_default_factory_preserved():
     captured: list[list[str]] = []
 
@@ -112,6 +159,13 @@ def test_variadic_base_model_rejected():
         @PydanticUnpacker()
         def broken(*payload: ParentModel):  # pragma: no cover - definition should fail
             return payload
+
+
+def test_levels_less_than_minus_one_rejected():
+    with pytest.raises(ValueError):
+        PydanticUnpacker(input_levels=-2)
+    with pytest.raises(ValueError):
+        PydanticUnpacker(output_levels=-5)
 
 
 def test_node_decorator_integration(monkeypatch, tmp_path):
@@ -152,3 +206,157 @@ def test_node_decorator_integration(monkeypatch, tmp_path):
         if not name.startswith("_")
     }
     assert visible_outputs == {"status": "status", "value": "value"}
+
+
+class AddRequest(BaseModel):
+    a: float = Field(..., description="First addend.", title="A")
+    b: float = Field(..., description="Second addend.", title="B")
+
+class ValidationError(BaseModel):
+    loc: typing.List[typing.Union[str, int]] = Field(..., title="Location")
+    msg: str = Field(..., title="Message")
+    type: str = Field(..., title="Error Type")
+
+class AddResponse(BaseModel):
+    result: float = Field(..., description="Sum of 'a' and 'b'.", title="Result")
+
+class HTTPValidationError(BaseModel):
+    detail: typing.Optional[typing.List[ValidationError]] = Field(None, title="Detail")
+
+
+class AddMathAddPostResponse200(BaseModel):
+    status_code: typing.Literal[200] = 200
+    content: AddResponse
+
+
+class AddMathAddPostResponse422(BaseModel):
+    status_code: typing.Literal[422] = 422
+    content: HTTPValidationError
+
+
+AddMathAddPostResponse = typing.Annotated[
+    typing.Union[AddMathAddPostResponse200, AddMathAddPostResponse422],
+    Field(discriminator="status_code"),
+]
+
+def test_complex_unpacker_decorator():
+    """Test PydanticUnpacker with complex discriminated union return type."""
+    
+    # Track calls to verify the function behavior
+    calls = []
+    
+    @PydanticUnpacker(input_levels=1, output_levels=1)
+    def add_math_add_post(
+        request: AddRequest,
+        *,  
+        client: typing.Optional[typing.Any] = None,
+        base_url: str = "http://localhost:8000",
+        timeout: typing.Optional[float] = None,
+    ) -> AddMathAddPostResponse:
+        calls.append((request, client, base_url, timeout))
+        
+        # Simulate validation error for negative numbers
+        if request.a < 0 or request.b < 0:
+            return AddMathAddPostResponse422(
+                status_code=422,
+                content=HTTPValidationError(
+                    detail=[
+                        ValidationError(
+                            loc=["body", "a" if request.a < 0 else "b"],
+                            msg="Value must be non-negative",
+                            type="value_error"
+                        )
+                    ]
+                )
+            )
+        
+        # Normal successful response
+        return AddMathAddPostResponse200(
+            status_code=200,
+            content=AddResponse(result=request.a + request.b)
+        )
+    
+    # Test 1: Verify signature has been flattened
+    sig = inspect.signature(add_math_add_post)
+    param_names = list(sig.parameters.keys())
+    
+    # The AddRequest should be flattened to request_a and request_b
+    assert "request_a" in param_names
+    assert "request_b" in param_names
+    assert "client" in param_names
+    assert "base_url" in param_names
+    assert "timeout" in param_names
+    assert "request" not in param_names  # Original parameter should be gone
+    
+    # Test 2: Verify parameter annotations
+    hints = typing.get_type_hints(add_math_add_post, include_extras=True)
+    
+    # Check flattened parameter types
+    a_ann = hints["request_a"]
+    origin = typing.get_origin(a_ann)
+    assert origin is typing.Annotated
+    base, meta = typing.get_args(a_ann)
+    assert base is float
+    assert meta["name"] == "request.a"
+    assert meta["description"] == "First addend."
+    
+    b_ann = hints["request_b"]
+    origin = typing.get_origin(b_ann)
+    assert origin is typing.Annotated
+    base, meta = typing.get_args(b_ann)
+    assert base is float
+    assert meta["name"] == "request.b"
+    assert meta["description"] == "Second addend."
+    
+    # Test 3: Call with valid values
+    calls.clear()
+    result = add_math_add_post(
+        request_a=5.0,
+        request_b=3.0,
+        client=None,
+        base_url="http://example.com",
+        timeout=30.0
+    )
+    
+    # Verify the function was called with reconstructed AddRequest
+    assert len(calls) == 1
+    request_arg, client_arg, base_url_arg, timeout_arg = calls[0]
+    assert isinstance(request_arg, AddRequest)
+    assert request_arg.a == 5.0
+    assert request_arg.b == 3.0
+    assert client_arg is None
+    assert base_url_arg == "http://example.com"
+    assert timeout_arg == 30.0
+    
+    # Verify the result - Union types are not flattened, so we get the full response object
+    assert isinstance(result, AddMathAddPostResponse200)
+    assert result.status_code == 200
+    assert result.content.result == 8.0
+    
+    # Test 4: Call with invalid values (negative number)
+    calls.clear()
+    result = add_math_add_post(
+        request_a=-5.0,
+        request_b=3.0,
+        client=None,
+        base_url="http://localhost:8000",
+        timeout=None
+    )
+    
+    # Verify we get error response
+    assert isinstance(result, AddMathAddPostResponse422)
+    assert result.status_code == 422
+    assert result.content.detail is not None
+    assert len(result.content.detail) == 1
+    assert result.content.detail[0].loc == ["body", "a"]
+    assert "non-negative" in result.content.detail[0].msg
+    
+    # Test 5: Verify default values are preserved
+    calls.clear()
+    result = add_math_add_post(request_a=1.0, request_b=2.0)
+    
+    # Check defaults were used
+    _, client_arg, base_url_arg, timeout_arg = calls[0]
+    assert client_arg is None
+    assert base_url_arg == "http://localhost:8000"
+    assert timeout_arg is None
