@@ -205,7 +205,10 @@ def test_node_decorator_integration(monkeypatch, tmp_path):
         for name in node.outputs
         if not name.startswith("_")
     }
-    assert visible_outputs == {"status": "status", "value": "value"}
+    assert visible_outputs == {
+        "ResponseModel_status": "ResponseModel_status",
+        "ResponseModel_value": "ResponseModel_value",
+    }
 
 
 class AddRequest(BaseModel):
@@ -331,11 +334,10 @@ def test_complex_unpacker_decorator():
     # Verify the result - Union types ARE flattened with output_levels=1
     # The result should be a tuple with flattened fields
     assert isinstance(result, tuple)
-    # Result is (status_code, content, __typename__)
-    assert len(result) == 3
+    # Result is (status_code, content)
+    assert len(result) == 2
     assert result[0] == 200  # status_code
     assert result[1] == {'result': 8.0}  # content as dict
-    assert result[2] == "AddMathAddPostResponse200"  # __typename__
     
     # Test 4: Call with invalid values (negative number)
     calls.clear()
@@ -349,7 +351,7 @@ def test_complex_unpacker_decorator():
     
     # Verify we get error response - flattened as tuple
     assert isinstance(result, tuple)
-    assert len(result) == 3
+    assert len(result) == 2
     assert result[0] == 422  # status_code
     # content is the HTTPValidationError as dict
     content = result[1]
@@ -358,7 +360,6 @@ def test_complex_unpacker_decorator():
     assert len(content["detail"]) == 1
     assert content["detail"][0]["loc"] == ["body", "a"]
     assert "non-negative" in content["detail"][0]["msg"]
-    assert result[2] == "AddMathAddPostResponse422"  # __typename__
     
     # Test 5: Verify default values are preserved
     calls.clear()
@@ -478,11 +479,10 @@ def test_complex_unpacker_decorator_deep():
     
     # Verify the result - Union types ARE flattened with output_levels=-1
     assert isinstance(result, tuple)
-    # Result is (status_code, content, __typename__)
-    assert len(result) == 3
+    # Result is (status_code, content)
+    assert len(result) == 2
     assert result[0] == 200  # status_code
     assert result[1] == {'result': 8.0}  # content as dict
-    assert result[2] == "AddMathAddPostResponse200"  # __typename__
     
     # Test 5: Call with invalid values (negative number)
     calls.clear()
@@ -496,7 +496,7 @@ def test_complex_unpacker_decorator_deep():
     
     # Verify we get error response - flattened as tuple
     assert isinstance(result, tuple)
-    assert len(result) == 3
+    assert len(result) == 2
     assert result[0] == 422  # status_code
     # content is the HTTPValidationError as dict
     content = result[1]
@@ -505,7 +505,6 @@ def test_complex_unpacker_decorator_deep():
     assert len(content["detail"]) == 1
     assert content["detail"][0]["loc"] == ["body", "a"]
     assert "non-negative" in content["detail"][0]["msg"]
-    assert result[2] == "AddMathAddPostResponse422"  # __typename__
     
     # Test 6: Verify default values are preserved
     calls.clear()

@@ -12,8 +12,10 @@ ports.
 from __future__ import annotations
 
 import inspect
+import os
 import typing
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache, wraps
@@ -32,7 +34,7 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
-from funcnodes_core.io import InputMeta, OutputMeta,NoValue
+from funcnodes_core.io import InputMeta, OutputMeta, NoValue
 
 # Import Union flattening utilities
 from .union_flattener import (
@@ -211,11 +213,12 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
             # Handle Union[BaseModel, ...] flattening
             all_union_fields = collect_union_fields(union_models)
             output_specs = []
+            union_base_name = _extract_output_name(output_annotation) or _derive_union_base_name(union_models)
             
             # Create specs for all possible fields across all union members
             for field_name, (field_type, field_info) in all_union_fields.items():
                 meta: OutputMeta = OutputMeta(
-                    name=field_name,
+                    name=_format_output_name(union_base_name, (field_name,)),
                     description=field_info.description or "",
                 )
                 value_options = _derive_value_options(field_info, field_type)
@@ -225,63 +228,83 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                     _OutputFieldSpec(path=(field_name,), meta=meta)
                 )
             
-            # Add a special field for the actual type name
-            output_specs.append(
-                _OutputFieldSpec(
-                    path=("__typename__",),
-                    meta=OutputMeta(
-                        name="__typename__",
-                        description="Actual type name of the returned union member",
-                    ),
-                )
-            )
-            
             if output_specs:
-                output_annotations = []
-                for spec in output_specs:
-                    if spec.path[0] == "__typename__":
-                        field_annotation = str
-                    else:
-                        field_name = spec.path[0]
-                        field_annotation = all_union_fields[field_name][0]
-                    output_annotations.append(Annotated[field_annotation, spec.meta])
-                
-                processed_return_annotation = tuple[tuple(output_annotations)]  # type: ignore[assignment]
-                
-                def _process_union_output(value: Any) -> tuple[Any, ...]:
-                    if value is None:
-                        raise ValueError("Expected Union[BaseModel] return value, got None")
-                    
-                    # Validate that it's one of the expected types
-                    if not isinstance(value, BaseModel):
-                        # Try to construct from one of the union members
-                        for model_cls in union_models:
-                            try:
-                                value = model_cls.model_validate(value)
-                                break
-                            except:
-                                continue
-                        else:
+                if len(output_specs) == 1:
+                    field_name = output_specs[0].path[0]
+                    field_annotation = all_union_fields[field_name][0]
+                    processed_return_annotation = Annotated[
+                        field_annotation, output_specs[0].meta
+                    ]
+
+                    def _process_union_output(value: Any) -> Any:
+                        if value is None:
                             raise ValueError(
-                                f"Could not validate value as any of the union members: {union_models}"
+                                "Expected Union[BaseModel] return value, got None"
                             )
-                    
-                    # Get the actual model's fields
-                    value_dict = value.model_dump()
-                    result = []
-                    
+                        if not isinstance(value, BaseModel):
+                            for model_cls in union_models:
+                                try:
+                                    value = model_cls.model_validate(value)
+                                    break
+                                except Exception:  # pragma: no cover - validation fallback
+                                    continue
+                            else:
+                                raise ValueError(
+                                    "Could not validate value as any of the union members "
+                                    f"{union_models}"
+                                )
+                        value_dict = value.model_dump()
+                        return (
+                            value_dict[field_name]
+                            if field_name in value_dict
+                            else NoValue
+                        )
+
+                else:
+                    output_annotations = []
                     for spec in output_specs:
                         field_name = spec.path[0]
-                        if field_name == "__typename__":
-                            result.append(value.__class__.__name__)
-                        elif field_name in value_dict:
-                            result.append(value_dict[field_name])
-                        else:
-                            # Use sentinel for fields not in this model
-                            result.append(NoValue)
-                    
-                    return tuple(result)
-                
+                        field_annotation = all_union_fields[field_name][0]
+                        output_annotations.append(Annotated[field_annotation, spec.meta])
+
+                    processed_return_annotation = tuple[
+                        tuple(output_annotations)
+                    ]  # type: ignore[assignment]
+
+                    def _process_union_output(value: Any) -> tuple[Any, ...]:
+                        if value is None:
+                            raise ValueError(
+                                "Expected Union[BaseModel] return value, got None"
+                            )
+                        # Validate that it's one of the expected types
+                        if not isinstance(value, BaseModel):
+                            # Try to construct from one of the union members
+                            for model_cls in union_models:
+                                try:
+                                    value = model_cls.model_validate(value)
+                                    break
+                                except Exception:  # pragma: no cover - validation fallback
+                                    continue
+                            else:
+                                raise ValueError(
+                                    "Could not validate value as any of the union members: "
+                                    f"{union_models}"
+                                )
+
+                        # Get the actual model's fields
+                        value_dict = value.model_dump()
+                        result = []
+
+                        for spec in output_specs:
+                            field_name = spec.path[0]
+                            if field_name in value_dict:
+                                result.append(value_dict[field_name])
+                            else:
+                                # Use sentinel for fields not in this model
+                                result.append(NoValue)
+
+                        return tuple(result)
+
                 output_processor = _process_union_output
         
         # Fallback to single model handling
@@ -291,28 +314,62 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                 traversal_levels = (
                     None if output_levels == -1 else max(1, output_levels)
                 )
-                output_specs = _build_output_specs(output_model_cls, traversal_levels)
+                base_name = _extract_output_name(output_annotation) or output_model_cls.__name__
+                output_specs = _build_output_specs(
+                    output_model_cls, traversal_levels, base_name
+                )
                 if output_specs:
-                    output_annotations = []
+                    if len(output_specs) == 1:
+                        spec = output_specs[0]
+                        processed_return_annotation = Annotated[
+                            _annotation_for_output(output_model_cls, spec.path),
+                            spec.meta,
+                        ]
 
-                    for spec in output_specs:
-                        field_annotation = _annotation_for_output(
-                            output_model_cls, spec.path
-                        )
-                        output_annotations.append(Annotated[field_annotation, spec.meta])
+                        def _process_output(value: Any) -> Any:
+                            if value is None:
+                                raise ValueError(
+                                    "Expected BaseModel return value, got None"
+                                )
+                            if not isinstance(value, output_model_cls):
+                                value = output_model_cls.model_validate(value)
+                            return _extract_value(value, spec.path)
 
-                    processed_return_annotation = tuple[tuple(output_annotations)]  # type: ignore[assignment]
+                    else:
+                        output_annotations = []
 
-                    def _process_output(value: Any) -> tuple[Any, ...]:
-                        if value is None:
-                            raise ValueError("Expected BaseModel return value, got None")
-                        if not isinstance(value, output_model_cls):
-                            value = output_model_cls.model_validate(value)
-                        return tuple(
-                            _extract_value(value, spec.path) for spec in output_specs
-                        )
+                        for spec in output_specs:
+                            field_annotation = _annotation_for_output(
+                                output_model_cls, spec.path
+                            )
+                            output_annotations.append(
+                                Annotated[field_annotation, spec.meta]
+                            )
+
+                        processed_return_annotation = tuple[
+                            tuple(output_annotations)
+                        ]  # type: ignore[assignment]
+
+                        def _process_output(value: Any) -> tuple[Any, ...]:
+                            if value is None:
+                                raise ValueError(
+                                    "Expected BaseModel return value, got None"
+                                )
+                            if not isinstance(value, output_model_cls):
+                                value = output_model_cls.model_validate(value)
+                            return tuple(
+                                _extract_value(value, spec.path)
+                                for spec in output_specs
+                            )
 
                     output_processor = _process_output
+            elif output_model_cls is not None and output_levels == 0:
+                processed_return_annotation = _annotate_scalar_output(
+                    output_annotation,
+                    _format_output_name(
+                        _extract_output_name(output_annotation) or output_model_cls.__name__
+                    ),
+                )
 
         if processed_return_annotation is not inspect._empty:
             new_annotations["return"] = processed_return_annotation
@@ -379,13 +436,37 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
 
 
 def _get_type_hints(func: Callable[..., Any]) -> dict[str, Any]:
-    """Resolve annotations with ``include_extras=True`` when available."""
+    """Resolve annotations with ``include_extras=True`` when available.
+
+    ``typing.get_type_hints`` normally evaluates postponed annotations using the
+    function's module globals. That breaks when decorators are defined inside
+    another function (common in tests) because any locally defined models are
+    only accessible through closure cells. We surface those closure locals to the
+    type-hint resolver so nested BaseModel declarations remain valid.
+    """
 
     globalns = getattr(func, "__globals__", {})
+
+    # Gather closure locals (``co_freevars``) so nested classes remain visible
+    # when ``from __future__ import annotations`` stores string annotations.
+    localns: dict[str, Any] = {}
+    closure = getattr(func, "__closure__", None)
+    if closure:
+        for name, cell in zip(func.__code__.co_freevars, closure):
+            try:
+                localns[name] = cell.cell_contents
+            except ValueError:  # pragma: no cover - empty cell
+                continue
+
     try:  # Python 3.10+
-        return typing.get_type_hints(func, globalns=globalns, include_extras=True)  # type: ignore[attr-defined]
+        return typing.get_type_hints(
+            func,
+            globalns=globalns,
+            localns=localns or None,
+            include_extras=True,
+        )  # type: ignore[attr-defined]
     except Exception:  # pragma: no cover - fallback for minimal environments
-        return typing.get_type_hints(func, globalns=globalns)
+        return typing.get_type_hints(func, globalns=globalns, localns=localns or None)
 
 
 def _resolve_model_cls(annotation: Any) -> type[BaseModel] | None:
@@ -465,6 +546,76 @@ def _derive_value_options(field: FieldInfo, annotation: Any) -> dict[str, Any]:
     if enum_options:
         options.setdefault("options", enum_options)
     return options
+
+
+def _sanitize_segment(segment: str) -> str:
+    return segment.replace(".", "_").replace(" ", "_")
+
+
+def _format_output_name(base_name: str, path: Sequence[str] | None = None) -> str:
+    tokens: list[str] = []
+    if base_name:
+        tokens.append(_sanitize_segment(base_name))
+    if path:
+        tokens.extend(_sanitize_segment(part) for part in path if part)
+    return "_".join(tokens) if tokens else "out"
+
+
+def _derive_union_base_name(models: Sequence[type[BaseModel]]) -> str:
+    names = [model.__name__ for model in models if getattr(model, "__name__", None)]
+    if not names:
+        return "Union"
+    prefix = os.path.commonprefix(names).rstrip("_")
+    if prefix and len(prefix) >= 3:
+        return prefix
+    return names[0]
+
+
+def _annotate_scalar_output(annotation: Any, name: str) -> Any:
+    """Attach an ``OutputMeta`` name to scalar return annotations."""
+
+    base = annotation
+    metadata: list[Any] = []
+    if get_origin(annotation) is Annotated:
+        args = list(get_args(annotation))
+        base = args[0]
+        metadata = args[1:]
+    return Annotated[base, *metadata, OutputMeta(name=name)]
+
+
+def _extract_output_name(annotation: Any) -> str | None:
+    """Return a custom output name defined via ``Annotated`` metadata if present."""
+
+    if get_origin(annotation) is not Annotated:
+        return None
+
+    args = get_args(annotation)
+    base = args[0]
+    metas = args[1:]
+
+    for meta in metas:
+        name = _name_from_meta(meta)
+        if name:
+            return _sanitize_segment(name)
+
+    # Support nested Annotated layers
+    return _extract_output_name(base)
+
+
+def _name_from_meta(meta: Any) -> str | None:
+    if isinstance(meta, Mapping):
+        name = meta.get("name")
+        if isinstance(name, str) and name:
+            return name
+    if isinstance(meta, FieldInfo):
+        extra = meta.json_schema_extra or {}
+        name = extra.get("funcnodes_output_name") or extra.get("name")
+        if isinstance(name, str) and name:
+            return name
+    name = getattr(meta, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    return None
 
 
 def _enum_options(annotation: Any) -> list[Any] | None:
@@ -567,7 +718,7 @@ def _assign_path(container: dict[str, Any], path: Sequence[str], value: Any) -> 
 
 
 def _build_output_specs(
-    model_cls: type[BaseModel], levels: int | None
+    model_cls: type[BaseModel], levels: int | None, base_name: str
 ) -> tuple[_OutputFieldSpec, ...]:
     """Reuse `_collect_field_summaries` to prepare return-value metadata.
 
@@ -579,7 +730,7 @@ def _build_output_specs(
     specs: list[_OutputFieldSpec] = []
     for summary in summaries:
         meta: OutputMeta = OutputMeta(
-            name=".".join(summary.alias_path),
+            name=_format_output_name(base_name, summary.alias_path),
             description=summary.field_info.description or "",
         )
         value_options = _derive_value_options(summary.field_info, summary.annotation)

@@ -74,26 +74,32 @@ def collect_union_fields(models: list[type[BaseModel]]) -> dict[str, tuple[type,
     return all_fields
 
 
-def flatten_union_output(value: BaseModel, all_fields: dict[str, Any]) -> dict[str, Any]:
+def _format_union_field_name(base: str, field: str) -> str:
+    return f"{base}_{field}".replace(".", "_")
+
+
+def flatten_union_output(
+    value: BaseModel, all_fields: dict[str, Any], base_name: str | None = None
+) -> dict[str, Any]:
     """Flatten a BaseModel instance with sentinel values for missing fields.
     
     Args:
         value: The actual BaseModel instance returned
         all_fields: All possible fields from the union
+        base_name: Optional prefix for generated field names
         
     Returns:
         Dictionary with all fields, using fn.NoValue for missing ones
     """
     result = {}
     value_dict = value.model_dump()
+    label = base_name or value.__class__.__name__
     
     for field_name in all_fields:
+        key = _format_union_field_name(label, field_name)
         if field_name in value_dict:
-            result[field_name] = value_dict[field_name]
+            result[key] = value_dict[field_name]
         else:
-            result[field_name] = fn.NoValue
-            
-    # Add a special field to indicate which model type was actually returned
-    result["__typename__"] = value.__class__.__name__
-    
+            result[key] = fn.NoValue
+
     return result

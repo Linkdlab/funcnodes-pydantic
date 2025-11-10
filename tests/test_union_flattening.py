@@ -71,19 +71,18 @@ def test_flatten_union_output_success():
     models = resolve_union_models(ApiResponse)
     fields = collect_union_fields(models)
     
-    flattened = flatten_union_output(response, fields)
+    flattened = flatten_union_output(response, fields, base_name="ApiResponse")
     
     # Check present fields
-    assert flattened["status"] == "success"
-    assert flattened["data"] == "test"
-    assert flattened["timestamp"] == 123.45
-    assert flattened["__typename__"] == "SuccessResponse"
+    assert flattened["ApiResponse_status"] == "success"
+    assert flattened["ApiResponse_data"] == "test"
+    assert flattened["ApiResponse_timestamp"] == 123.45
     
     # Check sentinel values for fields from other models
-    assert flattened["error_code"] is fn.NoValue
-    assert flattened["message"] is fn.NoValue
-    assert flattened["warning_level"] is fn.NoValue
-    assert flattened["details"] is fn.NoValue
+    assert flattened["ApiResponse_error_code"] is fn.NoValue
+    assert flattened["ApiResponse_message"] is fn.NoValue
+    assert flattened["ApiResponse_warning_level"] is fn.NoValue
+    assert flattened["ApiResponse_details"] is fn.NoValue
 
 
 def test_flatten_union_output_error():
@@ -92,19 +91,18 @@ def test_flatten_union_output_error():
     models = resolve_union_models(ApiResponse)
     fields = collect_union_fields(models)
     
-    flattened = flatten_union_output(response, fields)
+    flattened = flatten_union_output(response, fields, base_name="ApiResponse")
     
     # Check present fields
-    assert flattened["status"] == "error"
-    assert flattened["error_code"] == 404
-    assert flattened["message"] == "Not found"
-    assert flattened["__typename__"] == "ErrorResponse"
+    assert flattened["ApiResponse_status"] == "error"
+    assert flattened["ApiResponse_error_code"] == 404
+    assert flattened["ApiResponse_message"] == "Not found"
     
     # Check sentinel values
-    assert flattened["data"] is fn.NoValue
-    assert flattened["timestamp"] is fn.NoValue
-    assert flattened["warning_level"] is fn.NoValue
-    assert flattened["details"] is fn.NoValue
+    assert flattened["ApiResponse_data"] is fn.NoValue
+    assert flattened["ApiResponse_timestamp"] is fn.NoValue
+    assert flattened["ApiResponse_warning_level"] is fn.NoValue
+    assert flattened["ApiResponse_details"] is fn.NoValue
 
 
 def test_optional_union():

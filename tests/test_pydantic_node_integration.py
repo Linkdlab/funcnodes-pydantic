@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from funcnodes_pydantic import PydanticUnpacker
 from funcnodes_core import NodeDecorator
+from funcnodes_core.io import OutputMeta
 
 
 class AddRequest(BaseModel):
@@ -43,6 +44,7 @@ class AddMathAddPostResponse422(BaseModel):
 
 AddMathAddPostResponse = typing.Annotated[
     typing.Union[AddMathAddPostResponse200, AddMathAddPostResponse422],
+    OutputMeta(name="response"),
     Field(discriminator="status_code"),
 ]
 
@@ -94,22 +96,22 @@ async def test_deep_unpacker_with_node_decorator():
     assert "base_url" in input_names
     assert "timeout" in input_names
     
-    # Test 2: Check input metadata preservation
-    request_a_input = node.inputs["request_a"]
-    assert request_a_input.type == float
-    # The description should come from the Pydantic field
-    assert "First addend" in str(request_a_input.options.get("description", ""))
-    
-    request_b_input = node.inputs["request_b"]
-    assert request_b_input.type == float
-    assert "Second addend" in str(request_b_input.options.get("description", ""))
+    # Test 2: Check input metadata preservation via the serialized view
+    request_a_dict = node.inputs["request_a"].to_dict()
+    assert request_a_dict["type"] == "float"
+    assert "First addend" in request_a_dict["description"]
+
+    request_b_dict = node.inputs["request_b"].to_dict()
+    assert request_b_dict["type"] == "float"
+    assert "Second addend" in request_b_dict["description"]
     
     # Test 3: Verify outputs are flattened
     output_names = list(node.outputs.keys())
-    # With Union flattening, we should have individual fields
-    assert "status_code" in output_names
-    assert "content" in output_names  
-    assert "__typename__" in output_names
+    # With Union flattening, we should have individual fields prefixed with the annotated name
+    status_key = "response_status_code"
+    content_key = "response_content"
+    assert status_key in output_names
+    assert content_key in output_names
     
     # Test 4: Execute the node with valid values
     node.inputs["request_a"].value = 5.0
@@ -120,9 +122,8 @@ async def test_deep_unpacker_with_node_decorator():
     await node()
     
     # Check the flattened outputs
-    assert node.outputs["status_code"].value == 200
-    assert node.outputs["content"].value == {'result': 8.0}
-    assert node.outputs["__typename__"].value == "AddMathAddPostResponse200"
+    assert node.outputs[status_key].value == 200
+    assert node.outputs[content_key].value == {'result': 8.0}
     
     # Test 5: Execute with invalid values (negative number)
     node.inputs["request_a"].value = -5.0
@@ -131,11 +132,10 @@ async def test_deep_unpacker_with_node_decorator():
     await node()
     
     # Check error response
-    assert node.outputs["status_code"].value == 422
-    content = node.outputs["content"].value
+    assert node.outputs[status_key].value == 422
+    content = node.outputs[content_key].value
     assert isinstance(content, dict)
     assert "detail" in content
-    assert node.outputs["__typename__"].value == "AddMathAddPostResponse422"
     
     # Test 6: Test with nested model flattening (if output_levels=-1 fully flattens)
     # This depends on whether nested models in the content are also flattened
@@ -147,7 +147,7 @@ async def test_unpacker_preserves_node_metadata():
     
     @NodeDecorator(
         "math_service",
-        title="Math Addition Service",
+        node_name="Math Addition Service",
         description="Adds two numbers with validation"
     )
     @PydanticUnpacker(input_levels=1, output_levels=1)
@@ -161,7 +161,7 @@ async def test_unpacker_preserves_node_metadata():
     node = math_service()
     
     # Check node metadata is preserved
-    assert node.title == "Math Addition Service"
+    assert node.node_name == "Math Addition Service"
     assert node.description == "Adds two numbers with validation"
     
     # Check inputs are flattened
@@ -173,26 +173,28 @@ async def test_unpacker_preserves_node_metadata():
     node.inputs["request_b"].value = 20.0
     await node()
     
-    # Since AddResponse is flattened, we should have result as direct output
-    assert "result" in node.outputs
-    assert node.outputs["result"].value == 30.0
+    # Flattened outputs are exposed as model-prefixed scalar outputs
+    result_key = "AddResponse_result"
+    assert result_key in node.outputs
+    assert node.outputs[result_key].value == 30.0
 
 
+class NestedData(BaseModel):
+    value: float = Field(..., description="Nested value")
+    metadata: dict = Field(default_factory=dict, description="Extra metadata")
+
+class ComplexRequest(BaseModel):
+    data: NestedData
+    options: typing.List[str] = Field(default_factory=list)
+
+class ComplexResponse(BaseModel):
+    processed: NestedData
+    status: str = "ok"
+    
 @pytest.mark.asyncio
 async def test_complex_nested_unpacking():
     """Test deep unpacking with more complex nested structures."""
     
-    class NestedData(BaseModel):
-        value: float = Field(..., description="Nested value")
-        metadata: dict = Field(default_factory=dict, description="Extra metadata")
-    
-    class ComplexRequest(BaseModel):
-        data: NestedData
-        options: typing.List[str] = Field(default_factory=list)
-    
-    class ComplexResponse(BaseModel):
-        processed: NestedData
-        status: str = "ok"
     
     @NodeDecorator("process_complex")
     @PydanticUnpacker(input_levels=-1, output_levels=-1)
@@ -221,10 +223,13 @@ async def test_complex_nested_unpacking():
     await node()
     
     # With output_levels=-1, outputs should be deeply flattened
-    assert "processed_value" in node.outputs
-    assert "processed_metadata" in node.outputs
-    assert "status" in node.outputs
+    processed_value_key = "ComplexResponse_processed_value"
+    processed_metadata_key = "ComplexResponse_processed_metadata"
+    status_key = "ComplexResponse_status"
+    assert processed_value_key in node.outputs
+    assert processed_metadata_key in node.outputs
+    assert status_key in node.outputs
     
-    assert node.outputs["processed_value"].value == 10.0
-    assert node.outputs["processed_metadata"].value == {"original": "data", "processed": True}
-    assert node.outputs["status"].value == "ok"
+    assert node.outputs[processed_value_key].value == 10.0
+    assert node.outputs[processed_metadata_key].value == {"original": "data", "processed": True}
+    assert node.outputs[status_key].value == "ok"
