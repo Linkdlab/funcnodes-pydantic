@@ -112,3 +112,43 @@ def test_variadic_base_model_rejected():
         @PydanticUnpacker()
         def broken(*payload: ParentModel):  # pragma: no cover - definition should fail
             return payload
+
+
+def test_node_decorator_integration(monkeypatch, tmp_path):
+    config_dir = tmp_path / "funcnodes"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("FUNCNODES_CONFIG_DIR", str(config_dir))
+
+    from funcnodes_core.nodemaker import (  # local import to honor config dir
+        NodeDecorator,
+    )
+
+    @NodeDecorator(
+        id="tests.pydantic.unpacker.node",
+        name="Unpacked Parent Processor",
+        description="Helper node for verifying flattened IO metadata.",
+    )
+    @PydanticUnpacker(input_levels=2, output_levels=1)
+    def node_func(payload: ParentModel) -> ResponseModel:
+        return ResponseModel(status=payload.name, value=str(payload.child.code))
+
+    node = node_func()
+    assert node is not None
+
+    visible_inputs = {
+        name: node.inputs[name].name
+        for name in node.inputs
+        if not name.startswith("_")
+    }
+    assert visible_inputs == {
+        "payload_name": "payload.name",
+        "payload_child_code": "payload.child.code",
+        "payload_tags": "payload.tags",
+    }
+
+    visible_outputs = {
+        name: node.outputs[name].name
+        for name in node.outputs
+        if not name.startswith("_")
+    }
+    assert visible_outputs == {"status": "status", "value": "value"}
