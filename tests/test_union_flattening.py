@@ -51,7 +51,7 @@ def test_collect_union_fields():
     """Test collecting all fields from Union members."""
     models = resolve_union_models(ApiResponse)
     fields = collect_union_fields(models)
-    
+
     # Should have all unique fields from all models
     expected_fields = {
         "status",
@@ -63,6 +63,8 @@ def test_collect_union_fields():
         "details",
     }
     assert set(fields.keys()) == expected_fields
+    assert len(fields["status"].owners) == 3
+    assert [owner.__name__ for owner in fields["data"].owners] == ["SuccessResponse"]
 
 
 def test_flatten_union_output_success():
@@ -70,19 +72,19 @@ def test_flatten_union_output_success():
     response = SuccessResponse(data="test", timestamp=123.45)
     models = resolve_union_models(ApiResponse)
     fields = collect_union_fields(models)
-    
+
     flattened = flatten_union_output(response, fields, base_name="ApiResponse")
-    
+
     # Check present fields
     assert flattened["ApiResponse_status"] == "success"
-    assert flattened["ApiResponse_data"] == "test"
-    assert flattened["ApiResponse_timestamp"] == 123.45
-    
+    assert flattened["SuccessResponse_data"] == "test"
+    assert flattened["SuccessResponse_timestamp"] == 123.45
+
     # Check sentinel values for fields from other models
-    assert flattened["ApiResponse_error_code"] is fn.NoValue
-    assert flattened["ApiResponse_message"] is fn.NoValue
-    assert flattened["ApiResponse_warning_level"] is fn.NoValue
-    assert flattened["ApiResponse_details"] is fn.NoValue
+    assert flattened["ErrorResponse_error_code"] is fn.NoValue
+    assert flattened["ErrorResponse_message"] is fn.NoValue
+    assert flattened["WarningResponse_warning_level"] is fn.NoValue
+    assert flattened["WarningResponse_details"] is fn.NoValue
 
 
 def test_flatten_union_output_error():
@@ -90,25 +92,43 @@ def test_flatten_union_output_error():
     response = ErrorResponse(error_code=404, message="Not found")
     models = resolve_union_models(ApiResponse)
     fields = collect_union_fields(models)
-    
+
     flattened = flatten_union_output(response, fields, base_name="ApiResponse")
-    
+
     # Check present fields
     assert flattened["ApiResponse_status"] == "error"
-    assert flattened["ApiResponse_error_code"] == 404
-    assert flattened["ApiResponse_message"] == "Not found"
-    
+    assert flattened["ErrorResponse_error_code"] == 404
+    assert flattened["ErrorResponse_message"] == "Not found"
+
     # Check sentinel values
-    assert flattened["ApiResponse_data"] is fn.NoValue
-    assert flattened["ApiResponse_timestamp"] is fn.NoValue
-    assert flattened["ApiResponse_warning_level"] is fn.NoValue
-    assert flattened["ApiResponse_details"] is fn.NoValue
+    assert flattened["SuccessResponse_data"] is fn.NoValue
+    assert flattened["SuccessResponse_timestamp"] is fn.NoValue
+    assert flattened["WarningResponse_warning_level"] is fn.NoValue
+    assert flattened["WarningResponse_details"] is fn.NoValue
 
 
 def test_optional_union():
     """Test handling Optional[Union[...]]."""
     OptionalApi = typing.Optional[ApiResponse]
-    
+
     models = resolve_union_models(OptionalApi)
     assert models is not None
     assert len(models) == 3  # None is filtered out
+
+
+def test_flatten_union_output_forces_custom_name():
+    """Ensure we can force a shared prefix when requested."""
+    response = SuccessResponse(data="test", timestamp=1.23)
+    models = resolve_union_models(ApiResponse)
+    fields = collect_union_fields(models)
+
+    flattened = flatten_union_output(
+        response,
+        fields,
+        base_name="response",
+        force_base_name=True,
+    )
+
+    assert flattened["response_status"] == "success"
+    assert flattened["response_data"] == "test"
+    assert flattened["response_timestamp"] == 1.23

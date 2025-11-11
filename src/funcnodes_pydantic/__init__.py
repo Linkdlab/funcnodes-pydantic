@@ -19,7 +19,6 @@ from .models import (
 from .unpackers import PydanticUnpacker
 
 
-
 def _encode_base_model(value: Any, preview: bool = False):
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json" if preview else "python"), True
@@ -52,12 +51,17 @@ FIELD_SHELF = Shelf(
     nodes=[model_fields, model_get_field, model_set_field],
 )
 
+# from .demo import NODE_SHELF as DEMO_NODE_SHELF
 NODE_SHELF = Shelf(
     name="Funcnodes Pydantic",
     description="Nodes for validating and manipulating Pydantic models",
-    subshelves=[VALIDATION_SHELF, SERIALIZATION_SHELF, FIELD_SHELF],
+    subshelves=[
+        VALIDATION_SHELF,
+        SERIALIZATION_SHELF,
+        FIELD_SHELF,
+        # DEMO_NODE_SHELF
+    ],
 )
-
 __all__ = [
     "FIELD_SHELF",
     "FUNCNODES_RENDER_OPTIONS",

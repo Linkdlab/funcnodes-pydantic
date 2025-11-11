@@ -22,6 +22,7 @@ download = "https://pypi.org/project/funcnodes-pydantic/#files"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pre-commit",
     "pytest",
     "pytest-funcnodes",

@@ -40,8 +40,8 @@ from funcnodes_core.io import InputMeta, OutputMeta, NoValue
 from .union_flattener import (
     resolve_union_models,
     collect_union_fields,
+    derive_field_base_name,
 )
-
 
 
 _SENTINEL = object()
@@ -149,9 +149,7 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                     f"Cannot unpack BaseModel parameter '{parameter.name}' defined as variadic"
                 )
 
-            traversal_levels = (
-                None if input_levels == -1 else max(1, input_levels)
-            )
+            traversal_levels = None if input_levels == -1 else max(1, input_levels)
             summaries = _collect_field_summaries(model_cls, traversal_levels)
             field_specs: list[_InputFieldSpec] = []
             for summary in summaries:
@@ -203,35 +201,43 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
         output_processor: Callable[[Any], Any] | None = None
         output_annotation = type_hints.get("return", signature.return_annotation)
         processed_return_annotation = output_annotation
-        
+
         # First check for Union types
         union_models = None
+        custom_union_name: str | None = None
         if resolve_union_models is not None:
             union_models = resolve_union_models(output_annotation)
-            
+
         if union_models is not None and output_levels != 0:
             # Handle Union[BaseModel, ...] flattening
             all_union_fields = collect_union_fields(union_models)
             output_specs = []
-            union_base_name = _extract_output_name(output_annotation) or _derive_union_base_name(union_models)
-            
+            custom_union_name = _extract_output_name(output_annotation)
+            union_base_name = custom_union_name or _derive_union_base_name(union_models)
+            force_union_name = custom_union_name is not None
+
             # Create specs for all possible fields across all union members
-            for field_name, (field_type, field_info) in all_union_fields.items():
-                meta: OutputMeta = OutputMeta(
-                    name=_format_output_name(union_base_name, (field_name,)),
-                    description=field_info.description or "",
+            for field_name, field in all_union_fields.items():
+                field_base = derive_field_base_name(
+                    field,
+                    union_base_name,
+                    force_base_name=force_union_name,
                 )
-                value_options = _derive_value_options(field_info, field_type)
+                meta: OutputMeta = OutputMeta(
+                    name=_format_output_name(field_base, (field_name,)),
+                    description=field.field_info.description or "",
+                )
+                value_options = _derive_value_options(
+                    field.field_info, field.annotation
+                )
                 if value_options:
                     meta["value_options"] = value_options
-                output_specs.append(
-                    _OutputFieldSpec(path=(field_name,), meta=meta)
-                )
-            
+                output_specs.append(_OutputFieldSpec(path=(field_name,), meta=meta))
+
             if output_specs:
                 if len(output_specs) == 1:
                     field_name = output_specs[0].path[0]
-                    field_annotation = all_union_fields[field_name][0]
+                    field_annotation = all_union_fields[field_name].annotation
                     processed_return_annotation = Annotated[
                         field_annotation, output_specs[0].meta
                     ]
@@ -246,7 +252,9 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                                 try:
                                     value = model_cls.model_validate(value)
                                     break
-                                except Exception:  # pragma: no cover - validation fallback
+                                except (
+                                    Exception
+                                ):  # pragma: no cover - validation fallback
                                     continue
                             else:
                                 raise ValueError(
@@ -264,12 +272,12 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                     output_annotations = []
                     for spec in output_specs:
                         field_name = spec.path[0]
-                        field_annotation = all_union_fields[field_name][0]
-                        output_annotations.append(Annotated[field_annotation, spec.meta])
+                        field_annotation = all_union_fields[field_name].annotation
+                        output_annotations.append(
+                            Annotated[field_annotation, spec.meta]
+                        )
 
-                    processed_return_annotation = tuple[
-                        tuple(output_annotations)
-                    ]  # type: ignore[assignment]
+                    processed_return_annotation = tuple[tuple(output_annotations)]  # type: ignore[assignment]
 
                     def _process_union_output(value: Any) -> tuple[Any, ...]:
                         if value is None:
@@ -283,7 +291,9 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                                 try:
                                     value = model_cls.model_validate(value)
                                     break
-                                except Exception:  # pragma: no cover - validation fallback
+                                except (
+                                    Exception
+                                ):  # pragma: no cover - validation fallback
                                     continue
                             else:
                                 raise ValueError(
@@ -306,7 +316,7 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                         return tuple(result)
 
                 output_processor = _process_union_output
-        
+
         # Fallback to single model handling
         else:
             output_model_cls = _resolve_model_cls(output_annotation)
@@ -314,7 +324,9 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                 traversal_levels = (
                     None if output_levels == -1 else max(1, output_levels)
                 )
-                base_name = _extract_output_name(output_annotation) or output_model_cls.__name__
+                base_name = (
+                    _extract_output_name(output_annotation) or output_model_cls.__name__
+                )
                 output_specs = _build_output_specs(
                     output_model_cls, traversal_levels, base_name
                 )
@@ -346,9 +358,7 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                                 Annotated[field_annotation, spec.meta]
                             )
 
-                        processed_return_annotation = tuple[
-                            tuple(output_annotations)
-                        ]  # type: ignore[assignment]
+                        processed_return_annotation = tuple[tuple(output_annotations)]  # type: ignore[assignment]
 
                         def _process_output(value: Any) -> tuple[Any, ...]:
                             if value is None:
@@ -367,7 +377,8 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                 processed_return_annotation = _annotate_scalar_output(
                     output_annotation,
                     _format_output_name(
-                        _extract_output_name(output_annotation) or output_model_cls.__name__
+                        _extract_output_name(output_annotation)
+                        or output_model_cls.__name__
                     ),
                 )
 
@@ -654,7 +665,9 @@ def _collect_field_summaries(
             alias = field.alias or name
             annotation = field.annotation
             field_type = _base_annotation(annotation)
-            is_model = isinstance(field_type, type) and issubclass(field_type, BaseModel)
+            is_model = isinstance(field_type, type) and issubclass(
+                field_type, BaseModel
+            )
 
             should_descend = (
                 is_model
