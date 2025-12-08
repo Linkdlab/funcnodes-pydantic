@@ -30,3 +30,9 @@ repos:
     hooks:
       - id: flake8
         args: ["--config=.flake8"]
+
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.9.1
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
