@@ -42,6 +42,11 @@ class DeepResponseModel(BaseModel):
     status: str = Field(..., description="Mirror status")
 
 
+class OptionalFirstModel(BaseModel):
+    optional: int | None = Field(None, description="Optional value comes first")
+    required: int = Field(..., description="Required value defined after optional")
+
+
 def _extract_meta(annotation):
     origin = typing.get_origin(annotation)
     assert origin is typing.Annotated
@@ -151,6 +156,56 @@ def test_default_factory_preserved():
     assert captured[0] is not captured[1]
     assert first == ["x"]
     assert second == ["x"]
+
+
+def test_optional_field_preceding_required_is_reordered():
+    calls: list[OptionalFirstModel] = []
+
+    @PydanticUnpacker(input_levels=1)
+    def process(payload: OptionalFirstModel) -> int:
+        calls.append(payload)
+        return payload.required if payload.optional is None else payload.required + payload.optional
+
+    sig = inspect.signature(process)
+    assert tuple(sig.parameters) == ("payload_required", "payload_optional")
+
+    result_missing_optional = process(payload_required=4)
+    assert result_missing_optional == 4
+    assert calls[0].required == 4
+    assert calls[0].optional is None
+
+    result_with_optional = process(payload_required=2, payload_optional=3)
+    assert result_with_optional == 5
+    assert calls[1].required == 2
+    assert calls[1].optional == 3
+
+
+def test_required_parameters_following_model_defaults_do_not_error():
+    calls: list[tuple[OptionalFirstModel, int]] = []
+
+    @PydanticUnpacker(input_levels=1)
+    def process(payload: OptionalFirstModel, other: int) -> int:
+        calls.append((payload, other))
+        return payload.required + (payload.optional or 0) + other
+
+    sig = inspect.signature(process)
+    assert tuple(sig.parameters) == (
+        "payload_required",
+        "other",
+        "payload_optional",
+    )
+
+    result = process(payload_required=1, other=5)
+    assert result == 6
+    assert calls[0][0].required == 1
+    assert calls[0][0].optional is None
+    assert calls[0][1] == 5
+
+    result_with_optional = process(payload_required=2, other=1, payload_optional=4)
+    assert result_with_optional == 7
+    assert calls[1][0].required == 2
+    assert calls[1][0].optional == 4
+    assert calls[1][1] == 1
 
 
 def test_variadic_base_model_rejected():

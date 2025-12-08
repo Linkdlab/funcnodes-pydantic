@@ -11,6 +11,7 @@ ports.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 import typing
@@ -387,18 +388,53 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
         else:
             new_annotations.pop("return", None)
 
+        def _reorder_parameters(params: list[inspect.Parameter]) -> list[inspect.Parameter]:
+            """Ensure required positional parameters precede defaults.
+
+            Python forbids a positional-only/positional-or-keyword parameter without
+            a default from following one that has a default. BaseModel flattening can
+            produce that invalid ordering when the original model declares optional
+            fields before required ones. We reorder only within each compatible
+            ``Parameter.kind`` bucket to preserve the overall call semantics.
+            """
+
+            kind_order = [
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.VAR_KEYWORD,
+            ]
+
+            reordered: list[inspect.Parameter] = []
+            for kind in kind_order:
+                bucket = [p for p in params if p.kind == kind]
+                if kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                ):
+                    required = [p for p in bucket if p.default is inspect._empty]
+                    optional = [p for p in bucket if p.default is not inspect._empty]
+                    reordered.extend(required + optional)
+                else:
+                    reordered.extend(bucket)
+            return reordered
+
+        new_parameters = _reorder_parameters(new_parameters)
+
         new_signature = signature.replace(
             parameters=new_parameters,
             return_annotation=processed_return_annotation,
         )
 
-        @wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            bound = new_signature.bind_partial(*args, **kwargs)
-            bound.apply_defaults()
+        is_async = inspect.iscoroutinefunction(func)
+
+        def _build_call_arguments(
+            bound: inspect.BoundArguments,
+        ) -> tuple[list[Any], dict[str, Any]]:
+            """Restore original args/kwargs layout expected by ``func``."""
 
             model_instances: dict[str, BaseModel] = {}
-            # Reconstruct BaseModel instances from their flattened field values.
             for param, spec in model_param_specs.items():
                 payload: dict[str, Any] = {}
                 for field in spec.fields:
@@ -410,7 +446,6 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                     _assign_path(payload, field.path, value)
                 model_instances[param] = spec.model_cls.model_validate(payload)
 
-            # Rebuild the original positional/keyword layout before invoking ``func``.
             call_args: list[Any] = []
             call_kwargs: dict[str, Any] = {}
             for parameter in signature.parameters.values():
@@ -434,11 +469,40 @@ def PydanticUnpacker(input_levels: int = 1, output_levels: int = 1):
                 else:
                     call_kwargs[parameter.name] = value
 
+            return call_args, call_kwargs
+
+        @wraps(func)
+        async def _async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            bound = new_signature.bind_partial(*args, **kwargs)
+            bound.apply_defaults()
+
+            call_args, call_kwargs = _build_call_arguments(bound)
             result = func(*call_args, **call_kwargs)
+            if asyncio.iscoroutine(result):
+                result = await result
             if output_processor:
                 return output_processor(result)
             return result
 
+        @wraps(func)
+        def _sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            bound = new_signature.bind_partial(*args, **kwargs)
+            bound.apply_defaults()
+
+            call_args, call_kwargs = _build_call_arguments(bound)
+            result = func(*call_args, **call_kwargs)
+            if asyncio.iscoroutine(result):
+                try:
+                    result = asyncio.run(result)
+                except RuntimeError as exc:  # pragma: no cover - loop already running
+                    raise RuntimeError(
+                        "Coroutine return value requires awaiting within a running event loop"
+                    ) from exc
+            if output_processor:
+                return output_processor(result)
+            return result
+
+        wrapper = _async_wrapper if is_async else _sync_wrapper
         wrapper.__signature__ = new_signature
         wrapper.__annotations__ = new_annotations
         return wrapper
