@@ -559,7 +559,7 @@ wheels = [
 
 [[package]]
 name = "funcnodes-pydantic"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "funcnodes" },
@@ -579,7 +579,7 @@ dev = [
 requires-dist = [
     { name = "funcnodes", specifier = ">=1.0.0" },
     { name = "funcnodes-core", specifier = ">=1.0.0" },
-    { name = "pydantic", extras = ["email", "timezone"], specifier = ">=2.11,<3" },
+    { name = "pydantic", extras = ["email", "timezone"], specifier = ">=2.0,<3" },
 ]
 
 [package.metadata.requires-dev]
