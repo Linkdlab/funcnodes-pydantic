@@ -27,13 +27,11 @@ class UnionField:
 
 
 def resolve_union_models(annotation: Any) -> list[type[BaseModel]] | None:
-    """Extract all BaseModel types from a Union annotation.
+    """Extract BaseModel-only unions.
 
-    Args:
-        annotation: Type annotation that may contain Union[BaseModel, ...]
-
-    Returns:
-        List of BaseModel classes if Union contains BaseModels, None otherwise
+    Any Union that mixes BaseModel members with other concrete types (bytes,
+    dicts, primitives, etc.) cannot be flattened safely, so in that case we
+    return ``None`` to signal that normal union handling should be used.
     """
     origin = get_origin(annotation)
 
@@ -47,7 +45,8 @@ def resolve_union_models(annotation: Any) -> list[type[BaseModel]] | None:
         return None
 
     union_args = get_args(annotation)
-    models = []
+    models: list[type[BaseModel]] = []
+    saw_non_model = False
 
     for arg in union_args:
         # Skip None type
@@ -61,8 +60,16 @@ def resolve_union_models(annotation: Any) -> list[type[BaseModel]] | None:
         # Check if it's a BaseModel subclass
         if isinstance(arg, type) and issubclass(arg, BaseModel):
             models.append(arg)
+            continue
 
-    return models if models else None
+        # Anything that reaches here is not a BaseModel member. Mixing such
+        # types with BaseModels makes flattening ambiguous, so the caller
+        # should treat the union as unsupported.
+        saw_non_model = True
+
+    if not models or saw_non_model:
+        return None
+    return models
 
 
 def collect_union_fields(models: list[type[BaseModel]]) -> dict[str, UnionField]:

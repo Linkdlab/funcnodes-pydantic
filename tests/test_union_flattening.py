@@ -116,6 +116,15 @@ def test_optional_union():
     assert len(models) == 3  # None is filtered out
 
 
+def test_union_with_non_model_members():
+    """Mixed unions that include non-model types shouldn't be flattened."""
+
+    MixedUnion = Union[SuccessResponse, dict]
+
+    models = resolve_union_models(MixedUnion)
+    assert models is None
+
+
 def test_flatten_union_output_forces_custom_name():
     """Ensure we can force a shared prefix when requested."""
     response = SuccessResponse(data="test", timestamp=1.23)

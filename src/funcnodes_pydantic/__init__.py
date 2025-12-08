@@ -51,7 +51,7 @@ FIELD_SHELF = Shelf(
     nodes=[model_fields, model_get_field, model_set_field],
 )
 
-# from .demo import NODE_SHELF as DEMO_NODE_SHELF
+
 NODE_SHELF = Shelf(
     name="Funcnodes Pydantic",
     description="Nodes for validating and manipulating Pydantic models",
@@ -59,7 +59,7 @@ NODE_SHELF = Shelf(
         VALIDATION_SHELF,
         SERIALIZATION_SHELF,
         FIELD_SHELF,
-        # DEMO_NODE_SHELF
+        
     ],
 )
 __all__ = [
