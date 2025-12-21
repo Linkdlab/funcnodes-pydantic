@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from funcnodes_core.lib import Shelf
-from funcnodes_core.utils.serialization import JSONEncoder
+from funcnodes_core.utils.serialization import JSONEncoder,Encdata
 
 from .models import (
     model_fields,
@@ -21,15 +21,21 @@ from .unpackers import PydanticUnpacker
 
 def _encode_base_model(value: Any, preview: bool = False):
     if isinstance(value, BaseModel):
-        return value.model_dump(mode="json" if preview else "python"), True
-    return value, False
+        model_schema = value.model_json_schema()
+        model_data = value.model_dump(mode="json" if preview else "python")
+        obj = {
+            "data": model_data,
+            "schema": model_schema,
+        }
+        return Encdata(data=obj, handeled=True, done=False)
+    return Encdata(data=value, handeled=False)
 
 
 JSONEncoder.add_encoder(_encode_base_model, [BaseModel])
 
 FUNCNODES_RENDER_OPTIONS = {
     "typemap": {
-        f"{BaseModel.__module__}.{BaseModel.__name__}": "dict",
+        f"{BaseModel.__module__}.{BaseModel.__name__}": "json_schema",
     },
 }
 
@@ -51,6 +57,7 @@ FIELD_SHELF = Shelf(
     nodes=[model_fields, model_get_field, model_set_field],
 )
 
+# from ._demo import NODE_SHELF as DEMO_SHELF
 
 NODE_SHELF = Shelf(
     name="Funcnodes Pydantic",
@@ -59,7 +66,7 @@ NODE_SHELF = Shelf(
         VALIDATION_SHELF,
         SERIALIZATION_SHELF,
         FIELD_SHELF,
-        
+#       DEMO_SHELF,
     ],
 )
 __all__ = [

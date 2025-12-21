@@ -388,3 +388,4 @@ fabric.properties
 /.funcnodes
 /dist/*
 /src/*.egg-info
+coverage.json
